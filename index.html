@@ -123,7 +123,8 @@ table.t td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:no
 .qty span{min-width:30px;text-align:center;font-weight:600}
 .free{font-variant-numeric:tabular-nums}
 .free.z{color:var(--err);font-weight:600}
-.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:12px}
+.grid2>.card{min-width:0}
 .win{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding:12px 14px;margin-bottom:12px}
 /* modal */
 #modal{position:fixed;inset:0;background:rgba(17,24,39,.45);display:none;align-items:flex-start;justify-content:center;z-index:50;padding:5vh 12px;overflow:auto}
@@ -167,7 +168,15 @@ table.t td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:no
    Si se deja en null la app arranca en MODO PRUEBA (datos en este
    navegador, eventos de ejemplo, sin calendario ni Drive).
    ===================================================================== */
-const FIREBASE_CONFIG = null;
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCnkMtbc_jHIU5OF6D0tfB6QxBWuX2h8dk",
+  authDomain: "scope-ateneo.firebaseapp.com",
+  databaseURL: "https://scope-ateneo-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "scope-ateneo",
+  storageBucket: "scope-ateneo.firebasestorage.app",
+  messagingSenderId: "40967560228",
+  appId: "1:40967560228:web:c2b0078d47e995be518cb1"
+};
 /* Correos que pueden entrar (los 5 usuarios). Repetirlos en las reglas de Firebase. */
 const ALLOWED_EMAILS = [
   'asanmartinscope@gmail.com',
@@ -224,7 +233,7 @@ const DEFAULTS = {BUP:'MIC MANO', GRAB_AUDIO:'SIEMPRE + bup en la Tascam'};
 const DEFAULT_SETTINGS = {
   calendarId:'8dd4dbfabee5e2c71c022345788b2505171da4ad2c0778417c2bade4a444845d@group.calendar.google.com',
   driveFolderId:'', driveFormat:'gdoc', citMin:60, desmMin:30, daysBack:7, daysAhead:120,
-  roomCodes:{CAT:'CÁTEDRA MAYOR',CCH:'CACHARRERÍA',RYC:'RAMÓN Y CAJAL',PG:'PÉREZ GALDÓS',PGA:'PÉREZ GALDÓS',UBE:'UBEDA',LAR:'LARRA',BIB:'BIBLIOTECA',PEC:'PECERA BIBLIOTECA',EXP:'EXPO ANSELMA'}
+  roomCodes:{CAT:'CÁTEDRA MAYOR',CCH:'CACHARRERÍA'}
 };
 const TZ = 'Europe/Madrid';
 const MESES = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
@@ -298,7 +307,7 @@ const DB = {
   }
 };
 function setPath(o,path,val){const k=path.split('/');for(let i=0;i<k.length-1;i++){if(typeof o[k[i]]!=='object'||o[k[i]]===null)o[k[i]]={};o=o[k[i]]}const last=k[k.length-1];if(val===null)delete o[last];else o[last]=val}
-const S = () => ({...DEFAULT_SETTINGS,...(DB.data.settings||{}),roomCodes:{...(DB.data.settings?.roomCodes||DEFAULT_SETTINGS.roomCodes)}});
+const S = () => ({...DEFAULT_SETTINGS,...(DB.data.settings||{}),roomCodes:{...(DB.data.settings?(DB.data.settings.roomCodes||{}):DEFAULT_SETTINGS.roomCodes)}});
 const ITEMS = () => DB.data.items||{};
 const EVENTS = () => DB.data.events||{};
 const stamp = () => ({ts:Date.now(),by:DB.user?.name||''});
@@ -312,7 +321,7 @@ function E(id){
   const allDay=!!g.allDay;
   const start=new Date(allDay?madridMs(g.start,'00:00'):g.start);
   const end=new Date(allDay?madridMs(g.end,'00:00')-60000:g.end);
-  const room = raw.room || st.roomCodes[code] || '';
+  const room = raw.room || (st.roomCodes[code]!=='-'&&st.roomCodes[code]) || '';
   const sM=parts(start).H*60+parts(start).M, eM=parts(end).H*60+parts(end).M;
   const cit = raw.win?.cit || (allDay?'08:00':minToHM(Math.max(0,sM-st.citMin)));
   const fin = raw.win?.fin || (allDay?'23:59':minToHM(Math.min(1439,eM+st.desmMin)));
@@ -554,7 +563,7 @@ function mountAgenda(){
   <div data-part="list"></div>`,{list:agendaList,unk:unknownCodes});
 }
 function unknownCodes(){
-  const st=S(); const u=new Set(); allEvents().forEach(e=>{if(e.code&&!st.roomCodes[e.code]&&!e.raw.room)u.add(e.code)});
+  const st=S(); const u=new Set(); allEvents().forEach(e=>{if(e.code&&(!st.roomCodes[e.code]||st.roomCodes[e.code]==='-')&&!e.raw.room)u.add(e.code)});
   return u.size?`<div class="alert warn">Códigos de sala sin asignar: ${[...u].map(c=>`<b>[${h(c)}]</b>`).join(' ')} — <a href="#ajustes">asígnalos en Ajustes</a>.</div>`:'';
 }
 function agendaList(){
@@ -848,7 +857,7 @@ function mountSettings(){
 function codesTable(){
   const st=S(); const found={}; allEvents().forEach(e=>{if(e.code)found[e.code]=(found[e.code]||0)+1});
   const codes=[...new Set([...Object.keys(st.roomCodes),...Object.keys(found)])].sort((a,b)=>(found[b]||0)-(found[a]||0)||a.localeCompare(b));
-  return `<table class="t"><thead><tr><th>Código</th><th>Sala</th><th class="num">Eventos</th><th></th></tr></thead><tbody>${codes.map(c=>`<tr><td><b>[${h(c)}]</b></td><td><select class="in" data-code="${h(c)}"><option value="">— sin asignar —</option>${ROOMS.map(r=>`<option ${st.roomCodes[c]===r?'selected':''}>${r}</option>`).join('')}</select></td><td class="num">${found[c]||0}</td><td>${found[c]?'':`<button class="btn sm red" data-act="delCode" data-c="${h(c)}">×</button>`}</td></tr>`).join('')}</tbody></table>
+  return `<div class="tw"><table class="t"><thead><tr><th>Código</th><th>Sala</th><th class="num">Eventos</th><th></th></tr></thead><tbody>${codes.map(c=>`<tr><td><b>[${h(c)}]</b></td><td><select class="in" style="max-width:170px" data-code="${h(c)}"><option value="">— sin asignar —</option>${ROOMS.map(r=>`<option ${st.roomCodes[c]===r?'selected':''}>${r}</option>`).join('')}</select></td><td class="num">${found[c]||0}</td><td>${st.roomCodes[c]!==undefined?`<button class="btn sm red" data-act="delCode" data-c="${h(c)}" title="Borrar código">Borrar</button>`:''}</td></tr>`).join('')}</tbody></table></div>
   <div class="bar" style="margin-top:8px"><input class="in" id="newCode" placeholder="Nuevo código, p. ej. SAL" style="width:170px"><button class="btn" data-act="addCode">Añadir</button></div>`;
 }
 
@@ -869,7 +878,7 @@ document.addEventListener('change',e=>{
   if(t.dataset.set&&t.tagName==='SELECT') DB.set('settings/'+t.dataset.set,t.value);
   if(t.dataset.win){const id=t.dataset.id;DB.update({[`events/${id}/win/${t.dataset.win}`]:t.value||null,[`events/${id}/_matU`]:stamp()})}
   if(t.dataset.actChange==='room'){const id=t.dataset.id;DB.update({[`events/${id}/room`]:t.value||null,[`events/${id}/sheet/_u`]:stamp()})}
-  if(t.dataset.code!==undefined){DB.set('settings/roomCodes/'+t.dataset.code,t.value||null)}
+  if(t.dataset.code!==undefined){DB.set('settings/roomCodes/'+t.dataset.code,t.value||'-')}
   if(t.id==='impFile'&&t.files[0]){t.files[0].text().then(txt=>{try{const d=JSON.parse(txt);if(!confirm('Esto sustituye TODOS los datos por los del archivo. ¿Seguro?'))return;if(DB.mode==='firebase')DB.ref('').set(d);else{DB.data=d;DB.persist();schedule()}toast('Copia importada')}catch(err){toast('Archivo no válido')}})}
 });
 document.addEventListener('click',async e=>{
@@ -912,8 +921,8 @@ document.addEventListener('click',async e=>{
       await DB.set('items/'+iid,JSON.parse(JSON.stringify(it)));closeModal();toast('Guardado');return}
     case 'delItem':{const uses=allEvents().filter(ev=>ev.mat[i]&&ev.to>Date.now());if(!confirm(uses.length?`Está asignado en ${uses.length} acto(s) futuros. ¿Eliminar igualmente?`:'¿Eliminar este equipo?'))return;
       const up={[`items/${i}`]:null};uses.forEach(ev=>up[`events/${ev.id}/mat/${i}`]=null);await DB.update(up);closeModal();return}
-    case 'addCode':{const c=$('#newCode').value.trim().replace(/[\[\]]/g,'').toUpperCase();if(c)DB.set('settings/roomCodes/'+c.replace(/[.#$\/]/g,'_'),'');return}
-    case 'delCode': return DB.set('settings/roomCodes/'+b.dataset.c,null);
+    case 'addCode':{const c=$('#newCode').value.trim().replace(/[\[\]]/g,'').toUpperCase();if(c)DB.set('settings/roomCodes/'+c.replace(/[.#$\/]/g,'_'),'-');return}
+    case 'delCode':{const c=b.dataset.c;const n=allEvents().filter(e=>e.code===c).length;if(n&&!confirm(`[${c}] aparece en ${n} evento(s). Si lo borras, esos actos quedarán sin sala hasta que la elijas a mano. ¿Borrar?`))return;return DB.set('settings/roomCodes/'+c,null)}
     case 'export':{const blob=new Blob([JSON.stringify(DB.data,null,1)],{type:'application/json'});const l=document.createElement('a');l.href=URL.createObjectURL(blob);l.download=`ateneo-copia-${ymd(new Date())}.json`;l.click();return}
     case 'import': return $('#impFile').click();
     case 'exportInv':{const cols=['origin','baseRoom','location','category','name','qty','status','desc','serial','notes','supplier','rentFrom','rentTo'];
