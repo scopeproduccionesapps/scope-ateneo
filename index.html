@@ -486,35 +486,114 @@ async function syncCalendar(interactive=true){
     }
     upd['settings/lastSync']={ts:Date.now(),by:DB.user?.name||'',count:list.length};
     await DB.update(upd);
-    if(interactive) toast(n?`Calendario sincronizado: ${n} cambios`:'Calendario al día');
+    _EVC=null; let nf=0; try{nf=await autoLinkFolders()}catch(e){console.warn(e)}
+    if(interactive) toast((n?`Calendario sincronizado: ${n} cambios`:'Calendario al día')+(nf?` · ${nf} carpetas vinculadas`:''));
   }catch(e){toast('Error al sincronizar: '+e.message,5000)}
   syncing=false; updSync();
 }
 function updSync(txt){const l=S().lastSync;$('#syncInfo').textContent=txt||(DB.mode==='local'?'Modo prueba':`Calendario: ${relTime(l?.ts)}`)}
-async function driveMonthFolder(ev){
-  const st=S(); const root=st.driveFolderId; if(!root) throw new Error('Falta la carpeta de Drive en Ajustes.');
-  const p=parts(ev.start); const key=`${p.y}-${pad(p.m)}`; const name=`${key} ${MESES[p.m-1].toUpperCase()}`;
-  const cached=st.driveMonths?.[key]; if(cached) return cached;
-  const q=encodeURIComponent(`name='${name}' and '${root}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
-  const j=await gfetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)&supportsAllDrives=true&includeItemsFromAllDrives=true`);
-  let id=j.files?.[0]?.id;
-  if(!id){const c=await gfetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,parents:[root],mimeType:'application/vnd.google-apps.folder'})});id=c.id}
-  DB.set(`settings/driveMonths/${key}`,id); return id;
+/* ---- Drive: INFORMACIÓN ACTOS / AAAA / MM MES / [carpeta del acto] ---- */
+const norm = s => String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase();
+const FOLDER_MIME='application/vnd.google-apps.folder';
+const qEsc = s => String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+async function driveFind(parent,name){
+  const q=encodeURIComponent(`name='${qEsc(name)}' and '${parent}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`);
+  const j=await gfetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&supportsAllDrives=true&includeItemsFromAllDrives=true`);
+  return j.files?.[0]?.id||null;
+}
+async function driveMkdir(parent,name){
+  const c=await gfetch('https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,webViewLink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,parents:[parent],mimeType:FOLDER_MIME})});
+  return c;
+}
+async function driveListFolders(parent){
+  let out=[],page='';
+  do{const q=encodeURIComponent(`'${parent}' in parents and mimeType='${FOLDER_MIME}' and trashed=false`);
+    const j=await gfetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,webViewLink)&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true${page?'&pageToken='+page:''}`);
+    out=out.concat(j.files||[]);page=j.nextPageToken||'';}while(page);
+  return out;
+}
+const monthName = m => `${pad(m)} ${MESES[m-1].toUpperCase()}`;
+async function monthFolderId(y,m,create){
+  const st=S(); const root=st.driveFolderId; if(!root) throw new Error('Falta la carpeta INFORMACIÓN ACTOS en Ajustes.');
+  const key=`${y}-${pad(m)}`; if(st.driveMonths?.[key]) return st.driveMonths[key];
+  let yid=await driveFind(root,String(y));
+  if(!yid){ if(!create) return null; yid=(await driveMkdir(root,String(y))).id; }
+  let mid=await driveFind(yid,monthName(m));
+  if(!mid){ if(!create) return null; mid=(await driveMkdir(yid,monthName(m))).id; }
+  DB.set(`settings/driveMonths/${key}`,mid); return mid;
+}
+function folderNameFor(ev){
+  const p=parts(ev.start); const t=ev.allDay?'':` ${p.M?pad(p.H)+':'+pad(p.M):p.H}H`;
+  return `[${p.d} ${MESES[p.m-1].slice(0,3).toUpperCase()} (${DIA_LETRA[p.wd]})${t}] ${ev.code?`[${ev.code}] `:''}${ev.name}`.toUpperCase();
+}
+const STOP=new Set(['PARA','CON','DEL','LOS','LAS','UNA','POR','QUE','SOBRE','ENTRE']);
+const words = s => new Set(norm(s).replace(/[^A-Z0-9Ñ ]/g,' ').split(/\s+/).filter(w=>w.length>2&&!STOP.has(w)&&!/^\d+H?$/.test(w)));
+function folderScore(ev,f){
+  const n=norm(f.name); const m=n.match(/^\[([^\]]*)\]\s*(?:\[([^\]]*)\])?\s*(.*)$/);
+  if(!m) return 0;
+  const p=parts(ev.start); const head=m[1];
+  const dm=head.match(/^([\d,\sY]+?)\s*[A-Z]{3}/); const days=dm?(dm[1].match(/\d+/g)||[]).map(Number):[];
+  if(!days.includes(p.d)) return 0;
+  let s=3;
+  const codes=(m[2]||'')+' '+head;
+  if(ev.code&&new RegExp('(^|[^A-Z])'+norm(ev.code)+'([^A-Z]|$)').test(codes)) s+=2;
+  const a=words(ev.name), b=words(m[3]); let inter=0; a.forEach(w=>{if(b.has(w))inter++});
+  const ov=a.size&&b.size?inter/Math.min(a.size,b.size):0; s+=ov*4;
+  if(!ev.allDay){const hh=p.M?`${p.H}:${pad(p.M)}H`:`${p.H}H`; if(head.includes(hh)) s+=1;}
+  return s;
+}
+async function matchActFolder(ev){
+  const p=parts(ev.start); const mid=await monthFolderId(p.y,p.m,false);
+  if(!mid) return {best:null,list:[],monthId:null};
+  const list=(await driveListFolders(mid)).map(f=>({...f,score:folderScore(ev,f)})).sort((a,b)=>b.score-a.score||a.name.localeCompare(b.name));
+  const [f1,f2]=list; const ok=f1&&f1.score>=5.5&&(!f2||f1.score-f2.score>=1.5);
+  return {best:ok?f1:null,list,monthId:mid};
+}
+function linkFolder(id,f,auto){return DB.set(`events/${id}/driveFolder`,{id:f.id,name:f.name,url:f.webViewLink||`https://drive.google.com/drive/folders/${f.id}`,auto:!!auto,at:Date.now(),by:DB.user?.name||''})}
+async function autoLinkFolders(){ // tras sincronizar: vincula carpetas de los próximos 45 días si el emparejamiento es claro
+  if(!S().driveFolderId) return 0;
+  const lim=Date.now()+45*864e5; const evs=allEvents().filter(e=>!e.cancelled&&!e.raw.driveFolder&&e.end.getTime()>=Date.now()-864e5&&e.start.getTime()<=lim);
+  const byM={}; evs.forEach(e=>{const p=parts(e.start);(byM[p.y+'-'+p.m]=byM[p.y+'-'+p.m]||[]).push(e)});
+  let n=0;
+  for(const [k,list] of Object.entries(byM)){
+    const [y,m]=k.split('-').map(Number); const mid=await monthFolderId(y,m,false); if(!mid) continue;
+    const fs=await driveListFolders(mid);
+    for(const ev of list){const sc=fs.map(f=>({...f,score:folderScore(ev,f)})).sort((a,b)=>b.score-a.score);
+      const [f1,f2]=sc; if(f1&&f1.score>=5.5&&(!f2||f1.score-f2.score>=1.5)){await linkFolder(ev.id,f1,true);n++}}
+  }
+  return n;
+}
+async function openFolderPicker(id,thenSave){
+  const ev=E(id); toast('Buscando carpetas en Drive…',8000);
+  let r; try{r=await matchActFolder(ev)}catch(e){toast(e.message,5000);return}
+  toast('Listo',500);
+  const p=parts(ev.start);
+  openModal(`<div class="mh"><h2>Carpeta del acto en Drive</h2><button class="btn" data-act="close">Cerrar</button></div>
+  <div class="small mut" style="margin-bottom:8px">«${h(ev.name)}» · ${longDate(ev.start)} · buscando en <b>${p.y} / ${monthName(p.m)}</b>${r.monthId?'':' (esa carpeta de mes no existe todavía)'}</div>
+  <div class="pick">${r.list.length?r.list.map(f=>`<div class="row"><div>${h(f.name)}</div><span class="small ${f.score>=5.5?'':'mut'}">${f.score>=5.5?'coincide':f.score>=3?'mismo día':''}</span><button class="btn sm ${f.score>=5.5?'pri':''}" data-act="pickFolder" data-id="${id}" data-f="${h(f.id)}" data-fn="${h(f.name)}" data-u="${h(f.webViewLink||'')}" data-save="${thenSave?1:''}">Elegir</button></div>`).join(''):'<div class="empty">No hay carpetas de actos en ese mes.</div>'}</div>
+  <h3>¿No está? Crear carpeta nueva</h3>
+  <div class="bar"><input class="in" id="newFolder" style="flex:1" value="${h(folderNameFor(ev))}"><button class="btn" data-act="mkFolder" data-id="${id}" data-save="${thenSave?1:''}">Crear y vincular</button></div>`);
 }
 async function saveToDrive(id){
   const ev=E(id); const st=S();
+  let folder=ev.raw.driveFolder;
+  if(!folder){
+    const r=await matchActFolder(ev);
+    if(r.best){await linkFolder(id,r.best,true);folder={id:r.best.id}}
+    else {openFolderPicker(id,true);return}
+  }
   const blob=await buildDocx(ev); const name=fileName(ev);
   const gdoc=st.driveFormat!=='docx';
   const meta={name:gdoc?name:name+'.docx',mimeType:gdoc?'application/vnd.google-apps.document':'application/vnd.openxmlformats-officedocument.wordprocessingml.document'};
   const fd=()=>{const f=new FormData();f.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));f.append('file',blob);return f};
   let res=null;
-  if(ev.drive?.fileId && (ev.drive.fmt||'gdoc')===(gdoc?'gdoc':'docx')){
+  if(ev.drive?.fileId && ev.drive.folderId===folder.id && (ev.drive.fmt||'gdoc')===(gdoc?'gdoc':'docx')){
     try{res=await gfetch(`https://www.googleapis.com/upload/drive/v3/files/${ev.drive.fileId}?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink`,{method:'PATCH',body:fd()})}catch(e){res=null}
   }
-  if(!res){meta.parents=[await driveMonthFolder(ev)];
+  if(!res){meta.parents=[folder.id];
     res=await gfetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,webViewLink',{method:'POST',body:fd()})}
-  await DB.set(`events/${id}/drive`,{fileId:res.id,url:res.webViewLink,at:Date.now(),by:DB.user?.name||'',name,fmt:gdoc?'gdoc':'docx'});
-  toast('Hoja guardada en Drive');
+  await DB.set(`events/${id}/drive`,{fileId:res.id,url:res.webViewLink,at:Date.now(),by:DB.user?.name||'',name,fmt:gdoc?'gdoc':'docx',folderId:folder.id});
+  toast('Hoja guardada en la carpeta del acto');
 }
 
 /* ---------------- render / router ---------------- */
@@ -610,7 +689,7 @@ function mountEvent(id,tab){
   else body=`<div class="split"><div class="card aside" data-part="aside"></div><div><div data-part="alerts"></div><div data-part="form"></div></div></div>`;
   mount('ev/'+id+'/'+tab,`<div class="card dhead" data-part="head"></div><div class="tabs2" data-part="tabs"></div>${body}`,{
     head:()=>evHead(id), tabs:()=>evTabs(id,tab), notes:()=>notesList(id,false), gdesc:()=>gcalDesc(id),
-    aside:()=>`<h3 style="margin-top:0">Información de emails</h3>${notesList(id,true)}<div style="margin-top:8px"><a class="btn sm" href="#ev/${id}/com">+ Añadir información</a></div>${gcalDesc(id)}`,
+    aside:()=>`${E(id)?.raw.driveFolder?`<a class="btn sm" style="margin-bottom:8px" href="${h(E(id).raw.driveFolder.url)}" target="_blank" rel="noopener">Abrir carpeta del acto (riders, planos…) ↗</a>`:''}<h3 style="margin-top:0">Información de emails</h3>${notesList(id,true)}<div style="margin-top:8px"><a class="btn sm" href="#ev/${id}/com">+ Añadir información</a></div>${gcalDesc(id)}`,
     alerts:()=>alertsHtml(id), form:()=>sheetForm(id), win:()=>winHtml(id), mat:()=>matHtml(id)
   });
 }
@@ -633,6 +712,7 @@ function evHead(id){
       <button class="btn pri" data-act="drive" data-id="${id}">${ev.drive?'Actualizar en Drive':'Guardar en Drive'}</button>
       ${ev.drive?.url?`<a class="btn" href="${h(ev.drive.url)}" target="_blank" rel="noopener">Abrir hoja ↗</a>`:''}
     </div>
+    <div class="small" style="width:100%">${ev.raw.driveFolder?`Carpeta: <a href="${h(ev.raw.driveFolder.url)}" target="_blank" rel="noopener"><b>${h(ev.raw.driveFolder.name)}</b> ↗</a>${ev.raw.driveFolder.auto?' <span class="mut">(vinculada automáticamente)</span>':''} · <a href="javascript:void 0" data-act="folder" data-id="${id}">cambiar</a>`:`<span class="mut">Sin carpeta de Drive vinculada</span> · <a href="javascript:void 0" data-act="folder" data-id="${id}">buscar carpeta</a>`}</div>
     ${ev.drive?`<div class="small mut" style="width:100%">Última versión en Drive: ${relTime(ev.drive.at)} por ${h(ev.drive.by)} · ${h(ev.drive.name)}</div>`:''}`;
 }
 function evTabs(id,tab){
@@ -835,11 +915,11 @@ function mountSettings(){
   mount('ajustes',`<div class="grid2">
   <div class="card" style="padding:16px"><h3 style="margin-top:0">Calendario y Drive</h3><div class="form">
     <label>ID calendario Ateneo</label><input class="in" data-set="calendarId" value="${h(st.calendarId)}">
-    <label>Carpeta de Drive</label><input class="in" data-set="driveFolderId" value="${h(st.driveFolderId)}" placeholder="Pega el enlace o el ID de la carpeta">
+    <label>Carpeta INFORMACIÓN ACTOS</label><input class="in" data-set="driveFolderId" value="${h(st.driveFolderId)}" placeholder="Pega el enlace de la carpeta">
     <label>Formato en Drive</label><select class="in" data-set="driveFormat"><option value="gdoc" ${st.driveFormat!=='docx'?'selected':''}>Documento de Google</option><option value="docx" ${st.driveFormat==='docx'?'selected':''}>Archivo .docx</option></select>
     <label>Días hacia atrás</label><input class="in" type="number" data-set="daysBack" value="${st.daysBack}">
     <label>Días hacia delante</label><input class="in" type="number" data-set="daysAhead" value="${st.daysAhead}">
-  </div><p class="small mut">Las hojas se guardan en subcarpetas por mes («2026-11 NOVIEMBRE») dentro de la carpeta indicada. El calendario se sincroniza al abrir la app y cada 10 minutos mientras alguien la tenga abierta.</p>
+  </div><p class="small mut">Cada hoja se guarda en la carpeta de su acto: INFORMACIÓN ACTOS / 2026 / 11 NOVIEMBRE / [20 NOV (V) 19H] [CAT] …. La app vincula sola la carpeta cuando la fecha, el código y el título coinciden; si no está clara, te deja elegirla. El calendario se sincroniza al abrir la app y cada 10 minutos mientras alguien la tenga abierta.</p>
   <div class="small" data-part="syncinfo"></div></div>
   <div class="card" style="padding:16px"><h3 style="margin-top:0">Reserva de material por defecto</h3><div class="form">
     <label>Citación</label><span><input class="in" type="number" style="width:80px" data-set="citMin" value="${st.citMin}"> min antes del acto</span>
@@ -870,7 +950,7 @@ document.addEventListener('input',e=>{
   if(t.dataset.mst!==undefined){MODAL.st[t.dataset.mst]=t.value;renderModalParts(false);return}
   if(t.dataset.sheet){const id=t.dataset.id,k=t.dataset.sheet,v=t.value;debounce('s'+id+k,()=>DB.update({[`events/${id}/sheet/${k}`]:v===''&&!['ACTO','FECHA','HORARIO','BUP','GRAB_AUDIO'].includes(k)?null:v,[`events/${id}/sheet/_u`]:stamp()}));return}
   if(t.dataset.matnote){const id=t.dataset.id,i=t.dataset.matnote;debounce('m'+id+i,()=>DB.update({[`events/${id}/mat/${i}/note`]:t.value||null,[`events/${id}/_matU`]:stamp()}));return}
-  if(t.dataset.set&&t.tagName==='INPUT'){const k=t.dataset.set;let v=t.value.trim();if(k==='driveFolderId'){const m=v.match(/folders\/([\w-]+)/);if(m)v=m[1]}if(['citMin','desmMin','daysBack','daysAhead'].includes(k))v=+v||0;debounce('set'+k,()=>DB.set('settings/'+k,v),600)}
+  if(t.dataset.set&&t.tagName==='INPUT'){const k=t.dataset.set;let v=t.value.trim();if(k==='driveFolderId'){const m=v.match(/folders\/([\w-]+)/);if(m)v=m[1]}if(['citMin','desmMin','daysBack','daysAhead'].includes(k))v=+v||0;debounce('set'+k,()=>{DB.set('settings/'+k,v);if(k==='driveFolderId')DB.set('settings/driveMonths',null)},600)}
 });
 document.addEventListener('change',e=>{
   const t=e.target;
@@ -896,6 +976,9 @@ document.addEventListener('click',async e=>{
     case 'delNote': if(confirm('¿Borrar esta información?')) DB.set(`events/${id}/notes/${b.dataset.n}`,null); return;
     case 'docx': return downloadDocx(id);
     case 'drive': b.disabled=true;b.textContent='Guardando…';try{await saveToDrive(id)}finally{b.disabled=false;renderParts(true)} return;
+    case 'folder': return openFolderPicker(id,false);
+    case 'pickFolder':{await linkFolder(id,{id:b.dataset.f,name:b.dataset.fn,webViewLink:b.dataset.u},false);closeModal();toast('Carpeta vinculada');if(b.dataset.save)await saveToDrive(id);return}
+    case 'mkFolder':{const nm=$('#newFolder').value.trim();if(!nm)return;const ev=E(id);const p=parts(ev.start);const mid=await monthFolderId(p.y,p.m,true);const f=await driveMkdir(mid,nm);await linkFolder(id,f,false);closeModal();toast('Carpeta creada');if(b.dataset.save)await saveToDrive(id);return}
     case 'pick': return openPicker(id);
     case 'assign':{const ev=E(id);const cur=ev.mat[i]?.qty||0;return DB.update({[`events/${id}/mat/${i}/qty`]:cur+1,[`events/${id}/_matU`]:stamp()})}
     case 'q':{const ev=E(id);const n=(ev.mat[i]?.qty||0)+(+b.dataset.d);

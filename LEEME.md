@@ -44,7 +44,7 @@ En el **mismo proyecto** de Google Cloud que crea Firebase:
 Sube los archivos a un repositorio y activa GitHub Pages, como en las otras apps.
 
 ## 4. Primeros ajustes (pestaña Ajustes)
-- **Carpeta de Drive**: pega el enlace de la carpeta. Las hojas se guardan en subcarpetas por mes (`2026-11 NOVIEMBRE`), con el nombre de la plantilla: `20_NOV_V_19H_CÁTEDRA MAYOR_Hoja_de_Servicio`.
+- **Carpeta INFORMACIÓN ACTOS**: pega su enlace. La app busca la carpeta de cada acto dentro de `AAAA / MM MES` (p. ej. `2026 / 11 NOVIEMBRE`) y guarda ahí la hoja, con el nombre de la plantilla: `20_NOV_V_19H_CÁTEDRA MAYOR_Hoja_de_Servicio`. Si la carpeta del acto no aparece clara, te deja elegirla o crearla.
 - **Códigos de sala**: [CAT] y [CCH] ya están asignados. Los demás (RYC, PG, UBE, LAR, BIB, PEC, EXP) son una suposición: corrígelos. Cualquier código nuevo que llegue del calendario aparece ahí para asignarlo.
 - **Formato en Drive**: documento de Google (por defecto) o .docx.
 - **Reserva por defecto**: citación 60 min antes y desmontaje 30 min después. Cada acto se puede ajustar.
