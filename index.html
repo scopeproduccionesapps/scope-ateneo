@@ -292,14 +292,21 @@ const DB = {
       return Promise.resolve();
     }
     firebase.initializeApp(FIREBASE_CONFIG);
-    if(PUB_KEY){ this.mode='public';
-      firebase.database().ref('ateneo_pub/'+PUB_KEY).on('value',snap=>{this.data=snap.val()||{events:{}};schedule()},
-        err=>{$('#view').innerHTML='<div class="card login"><h2>Enlace no válido</h2><p class="mut">Pide el enlace actualizado a producción.</p></div>'});
-      return Promise.resolve(); }
+    const pubRef=firebase.database().ref(PUB_PATH); let pubOn=false, adminOn=false;
+    const enterPublic=msg=>{
+      if(adminOn){firebase.database().ref(DB_ROOT).off();adminOn=false}
+      this.user=null; PUBLIC=true; MOUNTED=''; this.data=null;
+      if(!pubOn){pubOn=true;pubRef.on('value',snap=>{if(!PUBLIC)return;this.data=snap.val()||{events:{}};schedule()},
+        err=>{$('#view').innerHTML='<div class="card login"><h2>Vista técnicos no disponible</h2><p class="mut">Falta la regla de lectura de «ateneo_pub» en Firebase.</p></div>'})}
+      if(msg) toast(msg,6000); schedule();
+    };
+    if(FORCED_PUB){enterPublic();return Promise.resolve()}
     return new Promise(res=>{
       firebase.auth().onAuthStateChanged(u=>{
-        if(!u){this.user=null;showLogin();return}
-        if(ALLOWED_EMAILS.length && !ALLOWED_EMAILS.map(e=>e.toLowerCase()).includes((u.email||'').toLowerCase())){showLogin('La cuenta '+u.email+' no tiene acceso.');firebase.auth().signOut();return}
+        if(!u){enterPublic();res();return}
+        if(ALLOWED_EMAILS.length && !ALLOWED_EMAILS.map(e=>e.toLowerCase()).includes((u.email||'').toLowerCase())){firebase.auth().signOut();enterPublic('La cuenta '+u.email+' no es de administrador. Se muestra la vista de técnicos.');res();return}
+        if(pubOn){pubRef.off();pubOn=false}
+        PUBLIC=false; MOUNTED=''; this.data=null; adminOn=true;
         this.user={name:(u.displayName||u.email).split(' ')[0],email:u.email,full:u.displayName};
         firebase.database().ref(DB_ROOT).on('value',snap=>{
           this.data=snap.val()||{};
@@ -511,7 +518,7 @@ async function syncCalendar(interactive=true){
   }catch(e){toast('Error al sincronizar: '+e.message,5000)}
   syncing=false; updSync();
 }
-function updSync(txt){const l=S().lastSync;$('#syncInfo').textContent=txt||(DB.mode==='local'?'Modo prueba':`Calendario: ${relTime(l?.ts)}`)}
+function updSync(txt){if(PUBLIC)return;const l=S().lastSync;$('#syncInfo').textContent=txt||(DB.mode==='local'?'Modo prueba':`Calendario: ${relTime(l?.ts)}`)}
 /* ---- Drive: INFORMACIÓN ACTOS / AAAA / MM MES / [carpeta del acto] ---- */
 const norm = s => String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase();
 const FOLDER_MIME='application/vnd.google-apps.folder';
@@ -684,7 +691,10 @@ function summaryHtml(s,id,priv){
         <div class="small mut">${i.tras?`<span class="chip warn">Traslado: ${h(i.tras)} → ${h(s.room)}</span>`:g.o==='oficina'?'<span class="chip blue">Traer de oficina</span>':h(i.from||'')}</div></div></div>`).join('')}</div>`).join(''):'<div class="mut">Sin material asignado.</div>'}
   </div></div>`;
 }
-const PUB_KEY = (()=>{const q=new URLSearchParams(location.search);return q.get('k')||(q.has('tec')&&!FIREBASE_CONFIG?'local':'')})();
+const QS=new URLSearchParams(location.search);
+const FORCED_PUB = QS.has('k')||QS.has('tec');   // enlace que fuerza la vista técnicos
+let PUBLIC = FORCED_PUB;                          // vista técnicos activa (también sin login)
+const PUB_PATH = 'ateneo_pub/main';
 function buildPub(){
   const from=Date.now()-3*864e5, to=Date.now()+90*864e5; const evs={};
   allEvents().filter(e=>e.end.getTime()>=from&&e.start.getTime()<=to).forEach(e=>evs[e.id]=summaryOf(e,false));
@@ -692,20 +702,20 @@ function buildPub(){
 }
 let lastPub='';
 function schedulePublish(){
-  if(DB.mode!=='firebase'||!DB.user||PUB_KEY||!S().pubKey) return;
+  if(DB.mode!=='firebase'||!DB.user||PUBLIC) return;
   debounce('pub',()=>{_EVC=null;const p=buildPub();const j=JSON.stringify(p);if(j===lastPub)return;lastPub=j;
-    firebase.database().ref('ateneo_pub/'+S().pubKey).set({...JSON.parse(j),updated:Date.now(),by:DB.user.name}).catch(e=>{lastPub='';console.warn('publicar vista técnicos',e)})},3000);
+    firebase.database().ref(PUB_PATH).set({...JSON.parse(j),updated:Date.now(),by:DB.user.name}).catch(e=>{lastPub='';console.warn('publicar vista técnicos',e)})},3000);
 }
 function pubEvents(){
-  const evs=PUB_KEY==='local'?buildPub().events:(DB.data.events||{});
+  const evs=DB.mode==='local'?buildPub().events:(DB.data?.events||{});
   return Object.entries(evs).map(([id,s])=>({id,...s})).sort((a,b)=>a.start-b.start);
 }
 const PUI={q:'',room:'',range:'14'};
 function routePublic(){
   $('#nav').innerHTML='<a class="on" href="#">Agenda técnicos</a>';
   $('#syncBtn').style.display='none'; $('#syncInfo').textContent=DB.data?.updated?`Actualizado ${relTime(DB.data.updated)}`:'';
-  $('#userBox').innerHTML=`<a class="hbtn" style="text-decoration:none" href="${location.pathname}">Acceso administrador</a>`;
-  $('#demoBar').innerHTML=PUB_KEY==='local'?'<div class="demo">MODO PRUEBA · vista técnicos con datos de ejemplo</div>':'';
+  $('#userBox').innerHTML=FORCED_PUB||DB.mode==='local'?`<a class="hbtn" style="text-decoration:none" href="${location.pathname}">Acceso administrador</a>`:`<button class="hbtn" data-act="adminLogin">Acceso administrador</button>`;
+  $('#demoBar').innerHTML=DB.mode==='local'?'<div class="demo">MODO PRUEBA · vista técnicos con datos de ejemplo</div>':'';
   const hsh=location.hash.slice(1); const [v,id]=hsh.split('/');
   if(v==='r'){const s=pubEvents().find(e=>e.id===id);
     mount('r/'+id,'<div data-part="sum"></div>',{sum:()=>{const x=pubEvents().find(e=>e.id===id);return x?summaryHtml(x,id,false):'<div class="empty card">Acto no encontrado. <a href="#">Volver</a></div>'}});MOUNTED='r/'+id;return}
@@ -718,6 +728,7 @@ function routePublic(){
 }
 function pubList(){
   if(!DB.data) return '<div class="empty">Cargando…</div>';
+  if(DB.mode!=='local'&&!DB.data.updated) return '<div class="empty card">Todavía no hay agenda publicada. Se publica sola en cuanto alguien de producción abre la app como administrador.</div>';
   const start=new Date(ymd(new Date())+'T00:00:00').getTime(); const lim=PUI.range==='all'?Infinity:Date.now()+(+PUI.range)*864e5; const q=norm(PUI.q);
   const evs=pubEvents().filter(e=>e.end>=start&&e.start<=lim&&(!PUI.room||e.room===PUI.room)&&(!q||norm(e.name+' '+e.room).includes(q)));
   if(!evs.length) return '<div class="empty card">No hay actos en estas fechas.</div>';
@@ -744,7 +755,8 @@ function renderParts(force){
 function mount(key,html,parts){MOUNTED=key;PARTS=parts;$('#view').innerHTML=html;renderParts(true);window.scrollTo(0,0)}
 const UI={q:'',room:'',range:'14',past:false,invQ:'',invOrigin:'',invRoom:'',avDate:'',avFrom:'',avTo:'',avQ:'',matView:'free'};
 function route(){
-  if(PUB_KEY) return routePublic();
+  if(PUBLIC) return routePublic();
+  $('#syncBtn').style.display='';
   if(!DB.data||(DB.mode==='firebase'&&!DB.user)) return;
   const hsh=location.hash.slice(1)||'agenda'; const [v,a,b]=hsh.split('/');
   $('#nav').innerHTML=[['agenda','Agenda'],['material','Material'],['inventario','Inventario'],['ajustes','Ajustes']].map(([k,l])=>`<a href="#${k}" class="${(v===k||(v==='ev'&&k==='agenda'))?'on':''}">${l}</a>`).join('');
@@ -1074,12 +1086,10 @@ function mountSettings(){
   </div>`,{pub:pubCard,codes:codesTable,syncinfo:()=>{const l=S().lastSync;return l?`Última sincronización: ${relTime(l.ts)} por ${h(l.by)} (${l.count} eventos)`:''}});
 }
 function pubCard(){
-  const k=S().pubKey; const url=k?`${location.origin}${location.pathname}?k=${k}`:'';
-  return `<p class="small mut" style="margin-top:0">Los técnicos ven la agenda y el resumen de cada acto (información técnica y material) sin entrar con Google. No ven los emails pegados, el contacto del cliente ni el estado de facturación. Se actualiza sola mientras alguien de producción tiene la app abierta.</p>
-  ${k?`<input class="in" style="width:100%" readonly value="${h(url)}" onclick="this.select()">
-  <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><button class="btn pri" data-act="copyPub">Copiar enlace</button><a class="btn" href="${h(url)}" target="_blank" rel="noopener">Abrir vista técnicos ↗</a><button class="btn red" data-act="newPub">Cambiar enlace</button></div>
-  <p class="small mut">«Cambiar enlace» desactiva el anterior (por si se ha compartido con quien no debía).</p>`
-  :`<button class="btn pri" data-act="newPub">Activar enlace para técnicos</button>`}`;
+  const url=`${location.origin}${location.pathname}`;
+  return `<p class="small mut" style="margin-top:0">Quien abre la app <b>sin entrar</b> ve la agenda y el resumen de cada acto (información técnica y material). No ve los emails pegados, el contacto del cliente, la situación ni el estado de facturación. Se actualiza sola mientras alguien de producción tiene la app abierta.</p>
+  <input class="in" style="width:100%" readonly value="${h(url)}" onclick="this.select()">
+  <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap"><a class="btn" href="${h(url)}?tec" target="_blank" rel="noopener">Ver como técnico ↗</a><button class="btn" data-act="pubNow">Publicar ahora</button></div>`;
 }
 function codesTable(){
   const st=S(); const found={}; allEvents().forEach(e=>{if(e.code)found[e.code]=(found[e.code]||0)+1});
@@ -1125,6 +1135,8 @@ document.addEventListener('click',async e=>{
     case 'docx': return downloadDocx(id);
     case 'drive': b.disabled=true;b.textContent='Guardando…';try{await saveToDrive(id)}finally{b.disabled=false;renderParts(true)} return;
     case 'folder': return openFolderPicker(id,false);
+    case 'adminLogin': try{const r=await firebase.auth().signInWithPopup(provider());gTok={t:r.credential.accessToken,exp:Date.now()+50*60000};sessionStorage.setItem('gtok',JSON.stringify(gTok))}catch(e){toast(e.message,5000)} return;
+    case 'pubNow': lastPub='';schedulePublish();toast('Publicando vista técnicos…');return;
     case 'copyPub': {const u=`${location.origin}${location.pathname}?k=${S().pubKey}`;try{await navigator.clipboard.writeText(u);toast('Enlace copiado')}catch(e){prompt('Copia el enlace:',u)}return}
     case 'newPub':{const old=S().pubKey;if(old&&!confirm('El enlace actual dejará de funcionar. ¿Crear uno nuevo?'))return;
       const k=Array.from(crypto.getRandomValues(new Uint8Array(12)),x=>x.toString(36).padStart(2,'0')).join('').slice(0,20);
@@ -1207,9 +1219,9 @@ function makeDemo(d){
 
 /* ---------------- arranque ---------------- */
 DB.init().then(()=>{route();
-  if(DB.mode==='firebase'&&!PUB_KEY){
-    setTimeout(()=>syncCalendar(false),1500);
-    setInterval(()=>syncCalendar(false),10*60000);
+  if(DB.mode==='firebase'&&!FORCED_PUB){
+    setTimeout(()=>{if(!PUBLIC)syncCalendar(false)},2500);
+    setInterval(()=>{if(!PUBLIC)syncCalendar(false)},10*60000);
   }
   setInterval(()=>updSync(),60000);
 });
