@@ -49,7 +49,7 @@ h3{font-size:13px;text-transform:uppercase;letter-spacing:.5px;color:var(--mut);
 .in,select.in,textarea.in{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 10px;min-width:0}
 textarea.in{width:100%;resize:vertical;min-height:60px}
 .in:focus{outline:2px solid #93c5fd;border-color:#93c5fd}
-.btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 12px;cursor:pointer;white-space:nowrap}
+.btn{text-decoration:none;display:inline-block;border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 12px;cursor:pointer;white-space:nowrap}
 .btn:hover{background:#f9fafb}
 .btn.pri{background:var(--ink);border-color:var(--ink);color:#fff}
 .btn.pri:hover{background:#374151}
@@ -413,6 +413,7 @@ function sheetStatus(ev){
   const touched=Object.keys(ev.sheet).filter(k=>!k.startsWith('_')).length;
   if(ev.drive?.at){ const changed=Math.max(ev.raw.sheet?._u?.ts||0, ev.raw._matU?.ts||0, ev.raw.gcal?._syncChange||0);
     return changed>ev.drive.at?{lbl:'Hoja desactualizada',cls:'warn'}:{lbl:'Hoja en Drive',cls:'ok'} }
+  if(ev.raw.driveExt) return {lbl:'Hoja en Drive',cls:'ok'};
   if(touched) return {lbl:'Hoja en curso',cls:'blue'};
   return {lbl:'Sin hoja',cls:''};
 }
@@ -486,7 +487,7 @@ async function syncCalendar(interactive=true){
     }
     upd['settings/lastSync']={ts:Date.now(),by:DB.user?.name||'',count:list.length};
     await DB.update(upd);
-    _EVC=null; let nf=0; try{nf=await autoLinkFolders()}catch(e){console.warn(e)}
+    _EVC=null; let nf=0; try{nf=await autoLinkFolders();_EVC=null;await detectSheets()}catch(e){console.warn(e)}
     if(interactive) toast((n?`Calendario sincronizado: ${n} cambios`:'Calendario al día')+(nf?` · ${nf} carpetas vinculadas`:''));
   }catch(e){toast('Error al sincronizar: '+e.message,5000)}
   syncing=false; updSync();
@@ -552,7 +553,7 @@ async function matchActFolder(ev){
 function linkFolder(id,f,auto){return DB.set(`events/${id}/driveFolder`,{id:f.id,name:f.name,url:f.webViewLink||`https://drive.google.com/drive/folders/${f.id}`,auto:!!auto,at:Date.now(),by:DB.user?.name||''})}
 async function autoLinkFolders(){ // tras sincronizar: vincula carpetas de los próximos 45 días si el emparejamiento es claro
   if(!S().driveFolderId) return 0;
-  const lim=Date.now()+45*864e5; const evs=allEvents().filter(e=>!e.cancelled&&!e.raw.driveFolder&&e.end.getTime()>=Date.now()-864e5&&e.start.getTime()<=lim);
+  const lim=Date.now()+45*864e5, from=Date.now()-S().daysBack*864e5; const evs=allEvents().filter(e=>!e.cancelled&&!e.raw.driveFolder&&e.end.getTime()>=from&&e.start.getTime()<=lim);
   const byM={}; evs.forEach(e=>{const p=parts(e.start);(byM[p.y+'-'+p.m]=byM[p.y+'-'+p.m]||[]).push(e)});
   let n=0;
   for(const [k,list] of Object.entries(byM)){
@@ -560,6 +561,31 @@ async function autoLinkFolders(){ // tras sincronizar: vincula carpetas de los p
     const fs=await driveListFolders(mid);
     for(const ev of list){const sc=fs.map(f=>({...f,score:folderScore(ev,f)})).sort((a,b)=>b.score-a.score);
       const [f1,f2]=sc; if(f1&&f1.score>=5.5&&(!f2||f1.score-f2.score>=1.5)){await linkFolder(ev.id,f1,true);n++}}
+  }
+  return n;
+}
+/* Hojas hechas fuera de la app: se buscan en la carpeta del acto */
+async function findSheetIn(folderId){
+  let out=[],page='';
+  do{const q=encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`);
+    const j=await gfetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,webViewLink,modifiedTime,mimeType,lastModifyingUser(displayName))&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true${page?'&pageToken='+page:''}`);
+    out=out.concat(j.files||[]);page=j.nextPageToken||'';}while(page);
+  return out.filter(f=>norm(f.name).replace(/[^A-Z]/g,'').includes('HOJADESERVICIO')).sort((a,b)=>(b.modifiedTime||'').localeCompare(a.modifiedTime||''));
+}
+async function detectSheet(id){
+  const ev=E(id); const fo=ev?.raw.driveFolder; if(!fo) return false;
+  const list=await findSheetIn(fo.id);
+  const mine=ev.raw.drive?.fileId; const ext=list.find(f=>f.id!==mine);
+  await DB.update({[`events/${id}/driveFolder/checked`]:Date.now(),
+    [`events/${id}/driveExt`]:ext?{fileId:ext.id,url:ext.webViewLink,name:ext.name,modified:ext.modifiedTime||'',by:ext.lastModifyingUser?.displayName||'',count:list.filter(f=>f.id!==mine).length}:null});
+  return !!ext;
+}
+async function detectSheets(){
+  const from=Date.now()-S().daysBack*864e5; let n=0;
+  for(const ev of allEvents()){
+    const fo=ev.raw.driveFolder; if(!fo||ev.cancelled||ev.end.getTime()<from) continue;
+    if(fo.checked&&Date.now()-fo.checked<3*36e5) continue;
+    if(await detectSheet(ev.id)) n++;
   }
   return n;
 }
@@ -582,7 +608,8 @@ async function saveToDrive(id){
     if(r.best){await linkFolder(id,r.best,true);folder={id:r.best.id}}
     else {openFolderPicker(id,true);return}
   }
-  const blob=await buildDocx(ev); const name=fileName(ev);
+  if(ev.raw.driveExt&&!ev.drive&&!confirm(`Este acto ya tiene una hoja hecha fuera de la app:\n«${ev.raw.driveExt.name}»\n\nLa app NO la va a modificar: creará otra hoja nueva, marcada «(app)», en la misma carpeta. ¿Continuar?`)) return;
+  const blob=await buildDocx(ev); const name=fileName(ev)+(ev.raw.driveExt?' (app)':'');
   const gdoc=st.driveFormat!=='docx';
   const meta={name:gdoc?name:name+'.docx',mimeType:gdoc?'application/vnd.google-apps.document':'application/vnd.openxmlformats-officedocument.wordprocessingml.document'};
   const fd=()=>{const f=new FormData();f.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));f.append('file',blob);return f};
@@ -709,10 +736,11 @@ function evHead(id){
     <div class="acts">
       ${ev.g.link?`<a class="btn sm" href="${h(ev.g.link)}" target="_blank" rel="noopener">Ver en Calendar</a>`:''}
       <button class="btn" data-act="docx" data-id="${id}">Descargar .docx</button>
-      <button class="btn pri" data-act="drive" data-id="${id}">${ev.drive?'Actualizar en Drive':'Guardar en Drive'}</button>
-      ${ev.drive?.url?`<a class="btn" href="${h(ev.drive.url)}" target="_blank" rel="noopener">Abrir hoja ↗</a>`:''}
+      <button class="btn ${ev.raw.driveExt&&!ev.drive?'':'pri'}" data-act="drive" data-id="${id}">${ev.drive?'Actualizar en Drive':ev.raw.driveExt?'Crear hoja desde la app':'Guardar en Drive'}</button>
+      ${ev.drive?.url?`<a class="btn" href="${h(ev.drive.url)}" target="_blank" rel="noopener">Abrir hoja ↗</a>`:ev.raw.driveExt?`<a class="btn pri" href="${h(ev.raw.driveExt.url)}" target="_blank" rel="noopener">Abrir hoja ↗</a>`:''}
     </div>
     <div class="small" style="width:100%">${ev.raw.driveFolder?`Carpeta: <a href="${h(ev.raw.driveFolder.url)}" target="_blank" rel="noopener"><b>${h(ev.raw.driveFolder.name)}</b> ↗</a>${ev.raw.driveFolder.auto?' <span class="mut">(vinculada automáticamente)</span>':''} · <a href="javascript:void 0" data-act="folder" data-id="${id}">cambiar</a>`:`<span class="mut">Sin carpeta de Drive vinculada</span> · <a href="javascript:void 0" data-act="folder" data-id="${id}">buscar carpeta</a>`}</div>
+    ${ev.raw.driveExt?`<div class="small" style="width:100%">Hoja existente: <a href="${h(ev.raw.driveExt.url)}" target="_blank" rel="noopener"><b>${h(ev.raw.driveExt.name)}</b> ↗</a> <span class="mut">(hecha fuera de la app${ev.raw.driveExt.by?' · última edición: '+h(ev.raw.driveExt.by):''}${ev.raw.driveExt.count>1?` · hay ${ev.raw.driveExt.count} hojas en la carpeta`:''})</span> · <a href="javascript:void 0" data-act="recheck" data-id="${id}">volver a buscar</a></div>`:ev.raw.driveFolder?`<div class="small mut" style="width:100%">No hay hoja de servicio en la carpeta · <a href="javascript:void 0" data-act="recheck" data-id="${id}">volver a buscar</a></div>`:''}
     ${ev.drive?`<div class="small mut" style="width:100%">Última versión en Drive: ${relTime(ev.drive.at)} por ${h(ev.drive.by)} · ${h(ev.drive.name)}</div>`:''}`;
 }
 function evTabs(id,tab){
@@ -977,7 +1005,8 @@ document.addEventListener('click',async e=>{
     case 'docx': return downloadDocx(id);
     case 'drive': b.disabled=true;b.textContent='Guardando…';try{await saveToDrive(id)}finally{b.disabled=false;renderParts(true)} return;
     case 'folder': return openFolderPicker(id,false);
-    case 'pickFolder':{await linkFolder(id,{id:b.dataset.f,name:b.dataset.fn,webViewLink:b.dataset.u},false);closeModal();toast('Carpeta vinculada');if(b.dataset.save)await saveToDrive(id);return}
+    case 'recheck':{toast('Buscando hoja en la carpeta…');const had=await detectSheet(id);toast(had?'Hoja encontrada':'No hay hoja de servicio en la carpeta');return}
+    case 'pickFolder':{await linkFolder(id,{id:b.dataset.f,name:b.dataset.fn,webViewLink:b.dataset.u},false);closeModal();toast('Carpeta vinculada');const had=await detectSheet(id);if(had)toast('Esa carpeta ya tiene hoja de servicio');else if(b.dataset.save)await saveToDrive(id);return}
     case 'mkFolder':{const nm=$('#newFolder').value.trim();if(!nm)return;const ev=E(id);const p=parts(ev.start);const mid=await monthFolderId(p.y,p.m,true);const f=await driveMkdir(mid,nm);await linkFolder(id,f,false);closeModal();toast('Carpeta creada');if(b.dataset.save)await saveToDrive(id);return}
     case 'pick': return openPicker(id);
     case 'assign':{const ev=E(id);const cur=ev.mat[i]?.qty||0;return DB.update({[`events/${id}/mat/${i}/qty`]:cur+1,[`events/${id}/_matU`]:stamp()})}
