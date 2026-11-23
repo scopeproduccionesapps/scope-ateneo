@@ -154,6 +154,18 @@ table.t td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:no
 .mi{display:grid;grid-template-columns:38px 1fr;gap:6px;padding:5px 0;border-top:1px solid #f3f4f6}
 .mi .q{font-variant-numeric:tabular-nums}
 @media print{header,#demoBar,.tabs2,.dhead,.noprint,#toast{display:none!important}body,html{background:#fff}main{padding:0}.card{border:0;box-shadow:none}.sumsec{break-inside:avoid;padding-left:0}}
+.sem{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;padding:2px 9px 2px 6px;border-radius:99px;white-space:nowrap}
+.sem i{width:10px;height:10px;border-radius:50%;display:inline-block}
+.sem.red{background:#fef2f2;color:#b91c1c}.sem.red i{background:#dc2626}
+.sem.amber{background:#fffbeb;color:#b45309}.sem.amber i{background:#f59e0b}
+.sem.green{background:#ecfdf5;color:#15803d}.sem.green i{background:#16a34a}
+.revbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px}
+.btn.okb{background:#16a34a;border-color:#16a34a;color:#fff}.btn.okb:hover{background:#15803d}
+.revbig{display:flex;gap:10px;align-items:center;border-radius:10px;padding:10px 12px;margin-top:12px}
+.revbig i{width:18px;height:18px;border-radius:50%;flex:none}
+.revbig.red{background:#fef2f2;color:#991b1b}.revbig.red i{background:#dc2626}
+.revbig.amber{background:#fffbeb;color:#92400e}.revbig.amber i{background:#f59e0b}
+.revbig.green{background:#ecfdf5;color:#166534}.revbig.green i{background:#16a34a}
 #toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 16px;border-radius:10px;z-index:60;display:none;max-width:90vw}
 .login{max-width:420px;margin:12vh auto;text-align:center;padding:30px}
 .empty{padding:30px;text-align:center;color:var(--mut)}
@@ -443,6 +455,14 @@ function sheetStatus(ev){
   if(touched) return {lbl:'Hoja en curso',cls:'blue'};
   return {lbl:'Sin hoja',cls:''};
 }
+function reviewState(ev){
+  const r=ev.raw.review;
+  const hasSheet=!!(ev.drive||ev.raw.driveExt||Object.keys(ev.sheet).some(k=>!k.startsWith('_')));
+  if(r?.ok){const changed=Math.max(ev.raw.sheet?._u?.ts||0,ev.raw._matU?.ts||0);
+    return changed>r.ts+60000?{c:'amber',lbl:'Cambios tras revisar',by:r.by,ts:r.ts}:{c:'green',lbl:'Revisada',by:r.by,ts:r.ts}}
+  return hasSheet?{c:'amber',lbl:'En proceso'}:{c:'red',lbl:'Sin hoja'};
+}
+const semChip = r => `<span class="sem ${r.c}"><i></i>${h(r.lbl)}</span>`;
 function fileName(ev){
   const p=parts(ev.start); const mm=MESES[p.m-1].slice(0,3).toUpperCase();
   const hh=ev.allDay?'TD':pad(p.H)+'H'+(p.M?pad(p.M):'');
@@ -591,20 +611,43 @@ async function autoLinkFolders(){ // tras sincronizar: vincula carpetas de los p
   return n;
 }
 /* Hojas hechas fuera de la app: se buscan en la carpeta del acto */
-async function findSheetIn(folderId){
+const FILE_FIELDS='nextPageToken,files(id,name,webViewLink,modifiedTime,mimeType,lastModifyingUser(displayName))';
+async function listFiles(folderId,foldersToo){
   let out=[],page='';
-  do{const q=encodeURIComponent(`'${folderId}' in parents and trashed=false and mimeType!='${FOLDER_MIME}'`);
-    const j=await gfetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(id,name,webViewLink,modifiedTime,mimeType,lastModifyingUser(displayName))&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true${page?'&pageToken='+page:''}`);
+  do{const q=encodeURIComponent(`'${folderId}' in parents and trashed=false${foldersToo?'':` and mimeType!='${FOLDER_MIME}'`}`);
+    const j=await gfetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=${FILE_FIELDS}&pageSize=300&supportsAllDrives=true&includeItemsFromAllDrives=true${page?'&pageToken='+page:''}`);
     out=out.concat(j.files||[]);page=j.nextPageToken||'';}while(page);
-  return out.filter(f=>norm(f.name).replace(/[^A-Z]/g,'').includes('HOJADESERVICIO')).sort((a,b)=>(b.modifiedTime||'').localeCompare(a.modifiedTime||''));
+  return out;
 }
+async function listActFiles(folderId){ // archivos de la carpeta del acto + un nivel de subcarpetas
+  const all=await listFiles(folderId,true); const files=all.filter(f=>f.mimeType!==FOLDER_MIME);
+  for(const sub of all.filter(f=>f.mimeType===FOLDER_MIME).slice(0,12)){
+    try{(await listFiles(sub.id,false)).forEach(f=>files.push({...f,sub:sub.name}))}catch(e){}
+  }
+  return files.sort((a,b)=>(b.modifiedTime||'').localeCompare(a.modifiedTime||''));
+}
+const looksLikeSheet = name => {const n=norm(name).replace(/[^A-Z]/g,'');return n.includes('HOJADESERVICIO')||n.includes('HOJASERVICIO')||n.includes('HOJADESERV')};
+async function findSheetIn(folderId){return (await listActFiles(folderId)).filter(f=>looksLikeSheet(f.name))}
+const extOf=(f,extra)=>({fileId:f.id,url:f.webViewLink||`https://drive.google.com/open?id=${f.id}`,name:(f.sub?f.sub+' / ':'')+f.name,modified:f.modifiedTime||'',by:f.lastModifyingUser?.displayName||'',...extra});
 async function detectSheet(id){
   const ev=E(id); const fo=ev?.raw.driveFolder; if(!fo) return false;
+  if(ev.raw.driveExt?.manual){await DB.set(`events/${id}/driveFolder/checked`,Date.now());return true}
   const list=await findSheetIn(fo.id);
-  const mine=ev.raw.drive?.fileId; const ext=list.find(f=>f.id!==mine);
-  await DB.update({[`events/${id}/driveFolder/checked`]:Date.now(),
-    [`events/${id}/driveExt`]:ext?{fileId:ext.id,url:ext.webViewLink,name:ext.name,modified:ext.modifiedTime||'',by:ext.lastModifyingUser?.displayName||'',count:list.filter(f=>f.id!==mine).length}:null});
+  const mine=ev.raw.drive?.fileId; const others=list.filter(f=>f.id!==mine); const ext=others[0];
+  await DB.update({[`events/${id}/driveFolder/checked`]:Date.now(),[`events/${id}/driveExt`]:ext?extOf(ext,{count:others.length}):null});
   return !!ext;
+}
+async function openSheetLinker(id){
+  const ev=E(id); const fo=ev.raw.driveFolder; let files=[], err='';
+  if(fo){toast('Leyendo la carpeta del acto…',8000);try{files=await listActFiles(fo.id)}catch(e){err=e.message}toast('Listo',400)}
+  openModal(`<div class="mh"><h2>Vincular hoja de servicio</h2><button class="btn" data-act="close">Cerrar</button></div>
+  <div class="small mut" style="margin-bottom:8px">«${h(ev.name)}» · ${longDate(ev.start)}</div>
+  ${fo?`<h3 style="margin-top:0">Archivos en la carpeta del acto</h3>${err?`<div class="alert err">${h(err)}</div>`:''}
+  <div class="pick" style="max-height:40vh">${files.length?files.map(f=>`<div class="row"><div>${f.sub?`<span class="small mut">${h(f.sub)} / </span>`:''}${h(f.name)}<div class="small mut">${f.modifiedTime?shortDate(new Date(f.modifiedTime)):''}${f.lastModifyingUser?.displayName?' · '+h(f.lastModifyingUser.displayName):''}</div></div><span>${looksLikeSheet(f.name)?'<span class="chip ok">parece la hoja</span>':''}</span><button class="btn sm ${looksLikeSheet(f.name)?'pri':''}" data-act="linkSheet" data-id="${id}" data-f="${h(f.id)}" data-fn="${h((f.sub?f.sub+' / ':'')+f.name)}" data-u="${h(f.webViewLink||'')}" data-m="${h(f.modifiedTime||'')}">Vincular</button></div>`).join(''):'<div class="empty">La carpeta está vacía.</div>'}</div>`
+  :`<div class="alert warn">Este acto no tiene carpeta de Drive vinculada. Puedes pegar el enlace de la hoja directamente.</div>`}
+  <h3>O pega el enlace de la hoja</h3>
+  <div class="bar"><input class="in" id="sheetUrl" style="flex:1" placeholder="https://docs.google.com/document/d/…"><button class="btn pri" data-act="linkSheetUrl" data-id="${id}">Vincular enlace</button></div>
+  ${ev.raw.driveExt?`<div style="margin-top:10px"><button class="btn red" data-act="unlinkSheet" data-id="${id}">Desvincular «${h(ev.raw.driveExt.name)}»</button></div>`:''}`);
 }
 async function detectSheets(){
   const from=Date.now()-S().daysBack*864e5; let n=0;
@@ -659,7 +702,7 @@ function summaryOf(ev,priv){
   const mat=Object.keys(ORIGINS).map(o=>({o,items:g[o].map(({it,a})=>({n:it.name,q:a.qty,from:it.origin==='ateneo'?it.baseRoom:it.origin==='alquiler'?(it.supplier||''):(it.location||''),note:a.note||'',tras:(it.origin==='ateneo'&&ev.room&&it.baseRoom!==ev.room)?it.baseRoom:''}))})).filter(x=>x.items.length);
   return {name:ev.name,code:ev.code||'',room:ev.room||'',start:ev.start.getTime(),end:ev.end.getTime(),allDay:ev.allDay,cit:ev.cit,fin:ev.fin,cancelled:ev.cancelled,
     resp:v.RESPONSABLE||'',horario:v.HORARIO||'',secs,mat,folder:ev.raw.driveFolder?.url||'',sheet:ev.drive?.url||ev.raw.driveExt?.url||'',
-    filled:Object.keys(ev.sheet).filter(k=>!k.startsWith('_')&&!['ESTADO','SITUACION','CONTACTO'].includes(k)&&ev.sheet[k]).length,pend:vals(ev.notes).filter(n=>!n.done).length,upd:Math.max(ev.raw.sheet?._u?.ts||0,ev.raw._matU?.ts||0)};
+    rev:reviewState(ev),filled:Object.keys(ev.sheet).filter(k=>!k.startsWith('_')&&!['ESTADO','SITUACION','CONTACTO'].includes(k)&&ev.sheet[k]).length,pend:vals(ev.notes).filter(n=>!n.done).length,upd:Math.max(ev.raw.sheet?._u?.ts||0,ev.raw._matU?.ts||0)};
 }
 function summaryHtml(s,id,priv){
   const col=ROOM_COLORS[s.room]||'#9ca3af'; const st=new Date(s.start), en=new Date(s.end);
@@ -675,6 +718,7 @@ function summaryHtml(s,id,priv){
       <div><span>Citación → fin desmontaje</span><b>${h(s.cit)} → ${h(s.fin)}</b></div>
       ${s.resp?`<div><span>Responsable Ateneo</span><b>${h(s.resp)}</b></div>`:''}
     </div>
+    ${s.rev?`<div class="revbig ${s.rev.c}"><i></i><div><b>Hoja de servicio: ${h(s.rev.lbl)}</b>${s.rev.by?`<div class="small">${s.rev.c==='green'?'Revisada':'Última revisión'} por ${h(s.rev.by)} · ${relTime(s.rev.ts)}</div>`:s.rev.c==='red'?'<div class="small">Todavía no hay hoja de servicio.</div>':'<div class="small">Producción la está preparando; puede cambiar.</div>'}</div></div>`:''}
     ${s.cancelled?'<div class="alert err" style="margin-top:10px">ACTO CANCELADO</div>':''}
     ${s.pend?`<div class="alert warn" style="margin-top:10px">Hay ${s.pend} email${s.pend>1?'s':''} sin pasar todavía a la hoja: puede faltar información.</div>`:''}
     <div class="noprint" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
@@ -723,6 +767,7 @@ function routePublic(){
     mount('pub',`<div class="bar"><input class="in" style="flex:1;min-width:160px" placeholder="Buscar acto…" data-pui="q" value="${h(PUI.q)}">
       <select class="in" data-pui="room"><option value="">Todas las salas</option>${ROOMS.map(r=>`<option ${PUI.room===r?'selected':''}>${r}</option>`).join('')}</select>
       <select class="in" data-pui="range">${[['7','7 días'],['14','14 días'],['31','31 días'],['all','Todo']].map(([k,l])=>`<option value="${k}" ${PUI.range===k?'selected':''}>${l}</option>`).join('')}</select></div>
+      <div class="small mut" style="margin:-4px 0 12px">${semChip({c:'red',lbl:'Sin hoja'})} ${semChip({c:'amber',lbl:'En proceso'})} ${semChip({c:'green',lbl:'Revisada y confirmada'})}</div>
       <div data-part="plist"></div>`,{plist:pubList});MOUNTED='pub';
   } else renderParts(false);
 }
@@ -738,7 +783,7 @@ function pubList(){
     return `<a class="card ev ${e.cancelled?'cancel':''}" href="#r/${e.id}"><span class="bar4" style="background:${col}"></span>
       <div class="t">${e.allDay?'Todo el día':hm(new Date(e.start))+'–'+hm(new Date(e.end))+'<small>citación '+h(e.cit)+'</small>'}</div>
       <div><div class="ttl">${h(e.name)}</div><div class="meta"><span class="chip"><span class="dot" style="background:${col}"></span>${h(e.room||'Sala ?')}</span>${e.cancelled?'<span class="chip err">Cancelado</span>':''}</div></div>
-      <div class="meta chips" style="justify-content:flex-end">${nMat?`<span class="chip">${nMat} equipo${nMat>1?'s':''}</span>`:''}${e.filled?'<span class="chip ok">Info técnica</span>':'<span class="chip">Sin info técnica</span>'}</div></a>`}).join('')}</div>`).join('');
+      <div class="meta chips" style="justify-content:flex-end">${nMat?`<span class="chip">${nMat} equipo${nMat>1?'s':''}</span>`:''}${e.rev?semChip(e.rev):''}</div></a>`}).join('')}</div>`).join('');
 }
 
 /* ---------------- render / router ---------------- */
@@ -753,7 +798,7 @@ function renderParts(force){
   });
 }
 function mount(key,html,parts){MOUNTED=key;PARTS=parts;$('#view').innerHTML=html;renderParts(true);window.scrollTo(0,0)}
-const UI={q:'',room:'',range:'14',past:false,invQ:'',invOrigin:'',invRoom:'',avDate:'',avFrom:'',avTo:'',avQ:'',matView:'free'};
+const UI={sem:'',q:'',room:'',range:'14',past:false,invQ:'',invOrigin:'',invRoom:'',avDate:'',avFrom:'',avTo:'',avQ:'',matView:'free'};
 function route(){
   if(PUBLIC) return routePublic();
   $('#syncBtn').style.display='';
@@ -783,6 +828,7 @@ function mountAgenda(){
     <input class="in" style="flex:1;min-width:180px" placeholder="Buscar acto…" data-ui="q" value="${h(UI.q)}">
     <select class="in" data-ui="room"><option value="">Todas las salas</option>${ROOMS.map(r=>`<option ${UI.room===r?'selected':''}>${r}</option>`).join('')}<option value="?" ${UI.room==='?'?'selected':''}>Sin sala</option></select>
     <select class="in" data-ui="range">${[['7','Próximos 7 días'],['14','Próximos 14 días'],['31','Próximos 31 días'],['all','Todo']].map(([k,l])=>`<option value="${k}" ${UI.range===k?'selected':''}>${l}</option>`).join('')}</select>
+    <select class="in" data-ui="sem"><option value="">Todos los estados</option><option value="red" ${UI.sem==='red'?'selected':''}>🔴 Sin hoja</option><option value="amber" ${UI.sem==='amber'?'selected':''}>🟠 En proceso</option><option value="green" ${UI.sem==='green'?'selected':''}>🟢 Revisadas</option></select>
     <label class="small mut"><input type="checkbox" data-ui="past" ${UI.past?'checked':''}> Ver pasados</label>
   </div>
   <div data-part="unk"></div>
@@ -796,7 +842,7 @@ function agendaList(){
   const now=Date.now(); const lim=UI.range==='all'?Infinity:now+(+UI.range)*864e5;
   const startCut=UI.past?now-S().daysBack*864e5:new Date(ymd(new Date())+'T00:00:00').getTime();
   const q=UI.q.toLowerCase();
-  const evs=allEvents().filter(e=>e.end.getTime()>=startCut&&e.start.getTime()<=lim&&(!UI.room||(UI.room==='?'?!e.room:e.room===UI.room))&&(!q||e.title.toLowerCase().includes(q)||(e.room||'').toLowerCase().includes(q)));
+  const evs=allEvents().filter(e=>e.end.getTime()>=startCut&&e.start.getTime()<=lim&&(!UI.room||(UI.room==='?'?!e.room:e.room===UI.room))&&(!q||e.title.toLowerCase().includes(q)||(e.room||'').toLowerCase().includes(q))&&(!UI.sem||reviewState(e).c===UI.sem));
   if(!evs.length) return `<div class="empty card">${Object.keys(EVENTS()).length?'No hay actos con estos filtros.':'Todavía no hay eventos. Pulsa «Sincronizar» para traerlos del calendario del Ateneo.'}</div>`;
   const all=allEvents().filter(e=>!e.cancelled);
   const byDay={}; evs.forEach(e=>(byDay[ymd(e.start)]=byDay[ymd(e.start)]||[]).push(e));
@@ -804,7 +850,7 @@ function agendaList(){
     ${list.map(e=>{
       const pend=vals(e.notes).filter(n=>!n.done).length; const nMat=Object.values(e.mat).reduce((s,a)=>s+(a.qty||0),0);
       const al=eventAlerts(e); const errs=al.filter(a=>a.lvl==='err').length, warns=al.filter(a=>a.lvl==='warn').length;
-      const ss=sheetStatus(e); const col=ROOM_COLORS[e.room]||'#9ca3af';
+      const ss=sheetStatus(e); const rv=reviewState(e); const col=ROOM_COLORS[e.room]||'#9ca3af';
       const ov=e.cancelled?[]:all.filter(o=>o.id!==e.id&&overlaps(o,e));
       return `<a class="card ev ${e.cancelled?'cancel':''}" href="#ev/${e.id}/hoja">
         <span class="bar4" style="background:${col}"></span>
@@ -817,7 +863,8 @@ function agendaList(){
           ${pend?`<span class="chip err">${pend} email${pend>1?'s':''} pendiente${pend>1?'s':''}</span>`:''}
           ${nMat?`<span class="chip">${nMat} equipo${nMat>1?'s':''}</span>`:''}
           ${errs?`<span class="chip err">⚠ ${errs}</span>`:warns?`<span class="chip warn">⚠ ${warns}</span>`:''}
-          <span class="chip ${ss.cls}">${ss.lbl}</span>
+          ${ss.cls==='warn'?`<span class="chip warn">${ss.lbl}</span>`:''}
+          ${semChip(rv)}
         </div></a>`}).join('')}</div>`).join('');
 }
 
@@ -853,7 +900,9 @@ function evHead(id){
       <span class="chip blue">Material reservado ${ev.cit} → ${ev.fin}</span>
       ${ev.cancelled?'<span class="chip err">Cancelado en calendario</span>':''}
       <span class="chip ${ss.cls}">${ss.lbl}</span>
-    </div></div>
+    </div>
+    <div class="revbar">${(()=>{const r=reviewState(ev);return semChip(r)+(r.c==='green'?` <span class="small mut">por ${h(r.by)} · ${relTime(r.ts)}</span> <button class="btn sm" data-act="review" data-id="${id}" data-v="0">Quitar revisión</button>`
+      :`${r.by?` <span class="small mut">revisada por ${h(r.by)} ${relTime(r.ts)}, con cambios después</span>`:''} <button class="btn sm okb" data-act="review" data-id="${id}" data-v="1">✓ Marcar hoja como revisada</button>`)})()}</div></div>
     <div class="acts">
       ${ev.g.link?`<a class="btn sm" href="${h(ev.g.link)}" target="_blank" rel="noopener">Ver en Calendar</a>`:''}
       <button class="btn" data-act="docx" data-id="${id}">Descargar .docx</button>
@@ -861,7 +910,7 @@ function evHead(id){
       ${ev.drive?.url?`<a class="btn" href="${h(ev.drive.url)}" target="_blank" rel="noopener">Abrir hoja ↗</a>`:ev.raw.driveExt?`<a class="btn pri" href="${h(ev.raw.driveExt.url)}" target="_blank" rel="noopener">Abrir hoja ↗</a>`:''}
     </div>
     <div class="small" style="width:100%">${ev.raw.driveFolder?`Carpeta: <a href="${h(ev.raw.driveFolder.url)}" target="_blank" rel="noopener"><b>${h(ev.raw.driveFolder.name)}</b> ↗</a>${ev.raw.driveFolder.auto?' <span class="mut">(vinculada automáticamente)</span>':''} · <a href="javascript:void 0" data-act="folder" data-id="${id}">cambiar</a>`:`<span class="mut">Sin carpeta de Drive vinculada</span> · <a href="javascript:void 0" data-act="folder" data-id="${id}">buscar carpeta</a>`}</div>
-    ${ev.raw.driveExt?`<div class="small" style="width:100%">Hoja existente: <a href="${h(ev.raw.driveExt.url)}" target="_blank" rel="noopener"><b>${h(ev.raw.driveExt.name)}</b> ↗</a> <span class="mut">(hecha fuera de la app${ev.raw.driveExt.by?' · última edición: '+h(ev.raw.driveExt.by):''}${ev.raw.driveExt.count>1?` · hay ${ev.raw.driveExt.count} hojas en la carpeta`:''})</span> · <a href="javascript:void 0" data-act="recheck" data-id="${id}">volver a buscar</a></div>`:ev.raw.driveFolder?`<div class="small mut" style="width:100%">No hay hoja de servicio en la carpeta · <a href="javascript:void 0" data-act="recheck" data-id="${id}">volver a buscar</a></div>`:''}
+    ${ev.raw.driveExt?`<div class="small" style="width:100%">Hoja existente: <a href="${h(ev.raw.driveExt.url)}" target="_blank" rel="noopener"><b>${h(ev.raw.driveExt.name)}</b> ↗</a> <span class="mut">(${ev.raw.driveExt.manual?'vinculada a mano por '+h(ev.raw.driveExt.linkedBy||''):'hecha fuera de la app'}${ev.raw.driveExt.by?' · última edición: '+h(ev.raw.driveExt.by):''}${ev.raw.driveExt.count>1?` · hay ${ev.raw.driveExt.count} hojas en la carpeta`:''})</span> · ${ev.raw.driveExt.manual?'<span class="mut">vinculada a mano</span>':`<a href="javascript:void 0" data-act="recheck" data-id="${id}">volver a buscar</a>`} · <a href="javascript:void 0" data-act="linkSheetUI" data-id="${id}">cambiar</a></div>`:`<div class="small mut" style="width:100%">${ev.raw.driveFolder?`No se ha encontrado la hoja en la carpeta · <a href="javascript:void 0" data-act="recheck" data-id="${id}">volver a buscar</a> · `:''}<a href="javascript:void 0" data-act="linkSheetUI" data-id="${id}">vincular hoja a mano</a></div>`}
     ${ev.drive?`<div class="small mut" style="width:100%">Última versión en Drive: ${relTime(ev.drive.at)} por ${h(ev.drive.by)} · ${h(ev.drive.name)}</div>`:''}`;
 }
 function evTabs(id,tab){
@@ -1135,6 +1184,15 @@ document.addEventListener('click',async e=>{
     case 'docx': return downloadDocx(id);
     case 'drive': b.disabled=true;b.textContent='Guardando…';try{await saveToDrive(id)}finally{b.disabled=false;renderParts(true)} return;
     case 'folder': return openFolderPicker(id,false);
+    case 'review': return DB.set(`events/${id}/review`,b.dataset.v==='1'?{ok:true,by:DB.user.name,ts:Date.now()}:null);
+    case 'linkSheetUI': return openSheetLinker(id);
+    case 'linkSheet': await DB.set(`events/${id}/driveExt`,extOf({id:b.dataset.f,name:b.dataset.fn,webViewLink:b.dataset.u,modifiedTime:b.dataset.m},{manual:true,linkedBy:DB.user.name})); closeModal(); toast('Hoja vinculada'); return;
+    case 'linkSheetUrl':{const u=$('#sheetUrl').value.trim();const m=u.match(/\/d\/([\w-]{10,})/)||u.match(/[?&]id=([\w-]{10,})/)||u.match(/^([\w-]{20,})$/);
+      if(!m) return toast('No reconozco ese enlace de Drive');
+      let f={id:m[1],name:'Hoja vinculada',webViewLink:u.startsWith('http')?u:''};
+      try{const j=await gfetch(`https://www.googleapis.com/drive/v3/files/${m[1]}?fields=id,name,webViewLink,modifiedTime,lastModifyingUser(displayName)&supportsAllDrives=true`);if(j)f=j}catch(e){}
+      await DB.set(`events/${id}/driveExt`,extOf(f,{manual:true,linkedBy:DB.user.name}));closeModal();toast('Hoja vinculada');return}
+    case 'unlinkSheet': await DB.set(`events/${id}/driveExt`,null); closeModal(); toast('Desvinculada'); return;
     case 'adminLogin': try{const r=await firebase.auth().signInWithPopup(provider());gTok={t:r.credential.accessToken,exp:Date.now()+50*60000};sessionStorage.setItem('gtok',JSON.stringify(gTok))}catch(e){toast(e.message,5000)} return;
     case 'pubNow': lastPub='';schedulePublish();toast('Publicando vista técnicos…');return;
     case 'copyPub': {const u=`${location.origin}${location.pathname}?k=${S().pubKey}`;try{await navigator.clipboard.writeText(u);toast('Enlace copiado')}catch(e){prompt('Copia el enlace:',u)}return}
