@@ -258,7 +258,7 @@ const SECTIONS = [
 const DEFAULTS = {BUP:'MIC MANO', GRAB_AUDIO:'SIEMPRE + bup en la Tascam'};
 const DEFAULT_SETTINGS = {
   calendarId:'8dd4dbfabee5e2c71c022345788b2505171da4ad2c0778417c2bade4a444845d@group.calendar.google.com',
-  driveFolderId:'', driveFormat:'gdoc', citMin:60, desmMin:30, daysBack:7, daysAhead:120,
+  driveFolderId:'', driveFormat:'gdoc', citMin:60, desmMin:30, daysBack:7, daysAhead:365,
   roomCodes:{CAT:'CÁTEDRA MAYOR',CCH:'CACHARRERÍA',ONLINE:'ONLINE'}
 };
 const TZ = 'Europe/Madrid';
@@ -324,6 +324,7 @@ const DB = {
           this.data=snap.val()||{};
           if(!this.data.settings){this.ref('settings').set(DEFAULT_SETTINGS)}
           if(!this.data.items){const o={};SEED_ITEMS.forEach(i=>o[i.id]=i);this.ref('items').set(o)}
+          if(this.data.settings&&!this.data.settings._ahead365){if((+this.data.settings.daysAhead||0)<365)this.ref('settings/daysAhead').set(365);this.ref('settings/_ahead365').set(true)}
           if(this.data.settings&&!this.data.settings._online){this.ref('settings/roomCodes/ONLINE').set('ONLINE');this.ref('settings/_online').set(true)}
           schedule(); schedulePublish();
         },err=>{showLogin('Sin permiso en la base de datos ('+err.code+'). Revisa las reglas.')});
@@ -599,7 +600,7 @@ async function matchActFolder(ev){
 function linkFolder(id,f,auto){return DB.set(`events/${id}/driveFolder`,{id:f.id,name:f.name,url:f.webViewLink||`https://drive.google.com/drive/folders/${f.id}`,auto:!!auto,at:Date.now(),by:DB.user?.name||''})}
 async function autoLinkFolders(){ // tras sincronizar: vincula carpetas de los próximos 45 días si el emparejamiento es claro
   if(!S().driveFolderId) return 0;
-  const lim=Date.now()+45*864e5, from=Date.now()-S().daysBack*864e5; const evs=allEvents().filter(e=>!e.cancelled&&!e.raw.driveFolder&&e.end.getTime()>=from&&e.start.getTime()<=lim);
+  const lim=Date.now()+(S().daysAhead||365)*864e5, from=Date.now()-S().daysBack*864e5; const evs=allEvents().filter(e=>!e.cancelled&&!e.raw.driveFolder&&e.end.getTime()>=from&&e.start.getTime()<=lim);
   const byM={}; evs.forEach(e=>{const p=parts(e.start);(byM[p.y+'-'+p.m]=byM[p.y+'-'+p.m]||[]).push(e)});
   let n=0;
   for(const [k,list] of Object.entries(byM)){
@@ -740,15 +741,20 @@ const FORCED_PUB = QS.has('k')||QS.has('tec');   // enlace que fuerza la vista t
 let PUBLIC = FORCED_PUB;                          // vista técnicos activa (también sin login)
 const PUB_PATH = 'ateneo_pub/main';
 function buildPub(){
-  const from=Date.now()-3*864e5, to=Date.now()+90*864e5; const evs={};
+  const from=Date.now()-3*864e5, to=Date.now()+Math.max(366,S().daysAhead||0)*864e5; const evs={};
   allEvents().filter(e=>e.end.getTime()>=from&&e.start.getTime()<=to).forEach(e=>evs[e.id]=summaryOf(e,false));
   return {events:evs};
 }
-let lastPub='';
+let lastPub='', pubCache=null;
 function schedulePublish(){
   if(DB.mode!=='firebase'||!DB.user||PUBLIC) return;
-  debounce('pub',()=>{_EVC=null;const p=buildPub();const j=JSON.stringify(p);if(j===lastPub)return;lastPub=j;
-    firebase.database().ref(PUB_PATH).set({...JSON.parse(j),updated:Date.now(),by:DB.user.name}).catch(e=>{lastPub='';console.warn('publicar vista técnicos',e)})},3000);
+  debounce('pub',()=>{_EVC=null;const p=buildPub();const ref=firebase.database().ref(PUB_PATH);
+    const cur={};for(const [id,ev] of Object.entries(p.events))cur[id]=JSON.stringify(ev);
+    if(!pubCache){ // primera vez en esta sesión: publicación completa
+      pubCache=cur; ref.set({events:JSON.parse(JSON.stringify(p.events)),updated:Date.now(),by:DB.user.name}).catch(e=>{pubCache=null;console.warn('publicar vista técnicos',e)});return}
+    const up={};for(const id in cur)if(cur[id]!==pubCache[id])up['events/'+id]=JSON.parse(cur[id]);for(const id in pubCache)if(!(id in cur))up['events/'+id]=null;
+    if(!Object.keys(up).length)return; up.updated=Date.now(); up.by=DB.user.name; pubCache=cur;
+    ref.update(up).catch(e=>{pubCache=null;console.warn('publicar vista técnicos',e)})},3000);
 }
 function pubEvents(){
   const evs=DB.mode==='local'?buildPub().events:(DB.data?.events||{});
@@ -766,7 +772,7 @@ function routePublic(){
   if(MOUNTED!=='pub'){
     mount('pub',`<div class="bar"><input class="in" style="flex:1;min-width:160px" placeholder="Buscar acto…" data-pui="q" value="${h(PUI.q)}">
       <select class="in" data-pui="room"><option value="">Todas las salas</option>${ROOMS.map(r=>`<option ${PUI.room===r?'selected':''}>${r}</option>`).join('')}</select>
-      <select class="in" data-pui="range">${[['7','7 días'],['14','14 días'],['31','31 días'],['all','Todo']].map(([k,l])=>`<option value="${k}" ${PUI.range===k?'selected':''}>${l}</option>`).join('')}</select></div>
+      <select class="in" data-pui="range">${[['7','7 días'],['14','14 días'],['31','1 mes'],['92','3 meses'],['183','6 meses'],['366','12 meses'],['all','Todo']].map(([k,l])=>`<option value="${k}" ${PUI.range===k?'selected':''}>${l}</option>`).join('')}</select></div>
       <div class="small mut" style="margin:-4px 0 12px">${semChip({c:'red',lbl:'Sin hoja'})} ${semChip({c:'amber',lbl:'En proceso'})} ${semChip({c:'green',lbl:'Revisada y confirmada'})}</div>
       <div data-part="plist"></div>`,{plist:pubList});MOUNTED='pub';
   } else renderParts(false);
@@ -827,7 +833,7 @@ function mountAgenda(){
   <div class="bar">
     <input class="in" style="flex:1;min-width:180px" placeholder="Buscar acto…" data-ui="q" value="${h(UI.q)}">
     <select class="in" data-ui="room"><option value="">Todas las salas</option>${ROOMS.map(r=>`<option ${UI.room===r?'selected':''}>${r}</option>`).join('')}<option value="?" ${UI.room==='?'?'selected':''}>Sin sala</option></select>
-    <select class="in" data-ui="range">${[['7','Próximos 7 días'],['14','Próximos 14 días'],['31','Próximos 31 días'],['all','Todo']].map(([k,l])=>`<option value="${k}" ${UI.range===k?'selected':''}>${l}</option>`).join('')}</select>
+    <select class="in" data-ui="range">${[['7','Próximos 7 días'],['14','Próximos 14 días'],['31','Próximo mes'],['92','Próximos 3 meses'],['183','Próximos 6 meses'],['366','Próximos 12 meses'],['all','Todo']].map(([k,l])=>`<option value="${k}" ${UI.range===k?'selected':''}>${l}</option>`).join('')}</select>
     <select class="in" data-ui="sem"><option value="">Todos los estados</option><option value="red" ${UI.sem==='red'?'selected':''}>🔴 Sin hoja</option><option value="amber" ${UI.sem==='amber'?'selected':''}>🟠 En proceso</option><option value="green" ${UI.sem==='green'?'selected':''}>🟢 Revisadas</option></select>
     <label class="small mut"><input type="checkbox" data-ui="past" ${UI.past?'checked':''}> Ver pasados</label>
   </div>
@@ -1194,7 +1200,7 @@ document.addEventListener('click',async e=>{
       await DB.set(`events/${id}/driveExt`,extOf(f,{manual:true,linkedBy:DB.user.name}));closeModal();toast('Hoja vinculada');return}
     case 'unlinkSheet': await DB.set(`events/${id}/driveExt`,null); closeModal(); toast('Desvinculada'); return;
     case 'adminLogin': try{const r=await firebase.auth().signInWithPopup(provider());gTok={t:r.credential.accessToken,exp:Date.now()+50*60000};sessionStorage.setItem('gtok',JSON.stringify(gTok))}catch(e){toast(e.message,5000)} return;
-    case 'pubNow': lastPub='';schedulePublish();toast('Publicando vista técnicos…');return;
+    case 'pubNow': lastPub='';pubCache=null;schedulePublish();toast('Publicando vista técnicos…');return;
     case 'copyPub': {const u=`${location.origin}${location.pathname}?k=${S().pubKey}`;try{await navigator.clipboard.writeText(u);toast('Enlace copiado')}catch(e){prompt('Copia el enlace:',u)}return}
     case 'newPub':{const old=S().pubKey;if(old&&!confirm('El enlace actual dejará de funcionar. ¿Crear uno nuevo?'))return;
       const k=Array.from(crypto.getRandomValues(new Uint8Array(12)),x=>x.toString(36).padStart(2,'0')).join('').slice(0,20);
